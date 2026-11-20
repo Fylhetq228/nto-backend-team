@@ -1,6 +1,18 @@
 package ru.nto.team
 
-// TODO: extend JpaRepository only after the corresponding JPA model is connected.
-// These interfaces are intentionally not active Spring Data repositories yet.
-interface StaffRepository
-interface PassRequestRepository
+import org.springframework.data.jpa.repository.JpaRepository
+
+interface StaffRepository : JpaRepository<Staff, Long> {
+    fun findByCode(code: String): Staff?
+}
+
+interface PassRequestRepository : JpaRepository<PassRequest, Long> {
+    fun findAllByHostIdOrderByValidFromAscIdAsc(hostId: Long): List<PassRequest>
+    fun findAllByHostIdAndStatusOrderByValidFromAscIdAsc(hostId: Long, status: RequestStatus): List<PassRequest>
+    fun findByIdAndHostId(id: Long, hostId: Long): PassRequest?
+    fun findAllByHostIdAndPhoneAndStatusIn(
+        hostId: Long,
+        phone: String,
+        statuses: Collection<RequestStatus>,
+    ): List<PassRequest>
+}
