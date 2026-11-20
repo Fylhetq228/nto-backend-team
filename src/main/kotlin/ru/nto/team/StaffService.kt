@@ -3,6 +3,10 @@ package ru.nto.team
 import org.springframework.stereotype.Service
 
 @Service
-class StaffService {
-    fun profile(code: String): ProfileDto = throw ApiException(501, "Task not implemented")
+class StaffService(private val staff: StaffRepository) {
+    fun profile(code: String): ProfileDto {
+        RequestValidation.requireValidCodeFormat(code)
+        val employee = staff.findByCode(code) ?: throw ApiException(401, "Unauthorized")
+        return ProfileDto(employee.fullName)
+    }
 }
