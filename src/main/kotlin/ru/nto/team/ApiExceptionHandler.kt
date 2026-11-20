@@ -1,14 +1,16 @@
 package ru.nto.team
 
 import org.springframework.http.ResponseEntity
-import org.springframework.web.bind.annotation.*
+import org.springframework.web.bind.annotation.ExceptionHandler
+import org.springframework.web.bind.annotation.RestControllerAdvice
 
-// TODO: implement domain errors and validation errors. This only makes unfinished routes usable.
-class ApiException(val status: Int, message: String) : RuntimeException(message)
+class ApiException(val status: Int, val body: Map<String, Any>) : RuntimeException(body.toString()) {
+    constructor(status: Int, error: String) : this(status, mapOf("error" to error))
+}
 
 @RestControllerAdvice
 class ApiExceptionHandler {
     @ExceptionHandler(ApiException::class)
-    fun unfinished(error: ApiException): ResponseEntity<Map<String, String>> =
-        ResponseEntity.status(error.status).body(mapOf("error" to error.message!!))
+    fun api(error: ApiException): ResponseEntity<Map<String, Any>> =
+        ResponseEntity.status(error.status).body(error.body)
 }
