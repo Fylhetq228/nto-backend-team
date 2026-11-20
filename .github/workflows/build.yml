@@ -1,0 +1,143 @@
+name: build
+on:
+  push:
+    branches: [ master ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17.10
+        env:
+          POSTGRES_DB: nto_team
+          POSTGRES_USER: nto
+          POSTGRES_PASSWORD: nto
+        ports:
+          - 5435:5432
+        options: >-
+          --health-cmd "pg_isready -U nto -d nto_team"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+      - name: Compile
+        run: ./gradlew compileKotlin --stacktrace
+      - name: Start application
+        env:
+          DB_URL: jdbc:postgresql://localhost:5435/nto_team
+          DB_USER: nto
+          DB_PASSWORD: nto
+          ADMIN_KEY: local-admin-key
+        run: |
+          ./gradlew bootRun > app.log 2>&1 &
+          for i in $(seq 1 90); do
+            if curl -s -o /dev/null http://localhost:8080/api/1111/auth; then echo "app is up"; exit 0; fi
+            sleep 2
+          done
+          cat app.log
+          exit 1
+      - name: API smoke tests
+        run: |
+          set -e
+          BASE=http://localhost:8080
+          fail() { echo "SMOKE FAIL: $1"; exit 1; }
+
+          code=$(curl -s -o /tmp/auth -w '%{http_code}' "$BASE/api/1111/auth")
+          [ "$code" = 200 ] || fail "auth status $code"
+          python3 -c "import json;d=json.load(open('/tmp/auth'));assert d['name']=='Иванов Иван Иванович',d" || fail "auth body"
+
+          code=$(curl -s -o /tmp/bad -w '%{http_code}' "$BASE/api/111/auth")
+          [ "$code" = 400 ] || fail "bad format status $code"
+          grep -q 'Invalid code format' /tmp/bad || fail "bad format body"
+
+          code=$(curl -s -o /tmp/un -w '%{http_code}' "$BASE/api/zzzz/auth")
+          [ "$code" = 401 ] || fail "unknown code status $code"
+
+          code=$(curl -s -o /tmp/list -w '%{http_code}' "$BASE/api/1111/requests")
+          [ "$code" = 200 ] || fail "list status $code"
+          python3 -c "import json;d=json.load(open('/tmp/list'));assert len(d)==2 and [x['id'] for x in d]==[1,4],d" || fail "list body"
+
+          code=$(curl -s -o /tmp/listp -w '%{http_code}' "$BASE/api/1111/requests?status=PENDING")
+          [ "$code" = 200 ] || fail "list pending status $code"
+          python3 -c "import json;d=json.load(open('/tmp/listp'));assert len(d)==1 and d[0]['id']==1,d" || fail "list pending body"
+
+          code=$(curl -s -o /tmp/listb -w '%{http_code}' "$BASE/api/1111/requests?status=pending")
+          [ "$code" = 400 ] || fail "bad status status $code"
+          grep -q 'Invalid status' /tmp/listb || fail "bad status body"
+
+          code=$(curl -s -o /tmp/other -w '%{http_code}' "$BASE/api/1111/requests/2")
+          [ "$code" = 404 ] || fail "foreign details status $code"
+
+          code=$(curl -s -o /tmp/det -w '%{http_code}' "$BASE/api/1111/requests/1")
+          [ "$code" = 200 ] || fail "details status $code"
+          python3 -c "import json;d=json.load(open('/tmp/det'));assert d['status']=='PENDING' and d['phone']=='+79991234567' and d['organization'] is None and d['comment'] is None and d['validFrom']=='2026-10-14T10:00:00',d" || fail "details body"
+
+          code=$(curl -s -o /tmp/val -w '%{http_code}' -X POST "$BASE/api/1111/requests" -H 'Content-Type: application/json' -d '{"fullName":"Я","phone":"123","purpose":"x","validFrom":"14.10.2026","validTo":"2026-10-14"}')
+          [ "$code" = 400 ] || fail "validation status $code"
+          python3 -c "import json;d=json.load(open('/tmp/val'));e=d['errors'];assert 'fullName' in e and 'phone' in e and 'purpose' in e and 'validFrom' in e and 'validTo' in e,e" || fail "validation body"
+
+          code=$(curl -s -o /tmp/mal -w '%{http_code}' -X POST "$BASE/api/1111/requests" -H 'Content-Type: application/json' -d '{bad json')
+          [ "$code" = 400 ] || fail "malformed status $code"
+          grep -q 'Invalid request body' /tmp/mal || fail "malformed body"
+
+          code=$(curl -s -o /tmp/cr -w '%{http_code}' -X POST "$BASE/api/1111/requests" -H 'Content-Type: application/json' -d '{"fullName":"Смирнов Гость Тестовый","phone":"+79990001122","organization":"  ","purpose":"Тестовая встреча","validFrom":"2027-06-01T10:00:00","validTo":"2027-06-01T11:00:00"}')
+          [ "$code" = 201 ] || fail "create status $code: $(cat /tmp/cr)"
+          python3 -c "import json;d=json.load(open('/tmp/cr'));assert d['status']=='PENDING' and d['organization'] is None and d['comment'] is None and d['createdAt']==d['updatedAt'],d" || fail "create body"
+          NEWID=$(python3 -c "import json;print(json.load(open('/tmp/cr'))['id'])")
+
+          code=$(curl -s -o /tmp/dup -w '%{http_code}' -X POST "$BASE/api/1111/requests" -H 'Content-Type: application/json' -d '{"fullName":"Смирнов Гость Тестовый","phone":"+79990001122","purpose":"Тестовая встреча","validFrom":"2027-06-01T10:30:00","validTo":"2027-06-01T12:00:00"}')
+          [ "$code" = 409 ] || fail "duplicate status $code"
+          grep -q 'Duplicate request' /tmp/dup || fail "duplicate body"
+
+          code=$(curl -s -o /tmp/adj -w '%{http_code}' -X POST "$BASE/api/1111/requests" -H 'Content-Type: application/json' -d '{"fullName":"Смирнов Гость Тестовый","phone":"+79990001122","purpose":"Тестовая встреча","validFrom":"2027-06-01T11:00:00","validTo":"2027-06-01T12:00:00"}')
+          [ "$code" = 201 ] || fail "adjacent status $code"
+          ADJID=$(python3 -c "import json;print(json.load(open('/tmp/adj'))['id'])")
+
+          code=$(curl -s -o /tmp/cn -w '%{http_code}' -X POST "$BASE/api/1111/requests/$NEWID/cancel")
+          [ "$code" = 200 ] || fail "cancel status $code"
+          python3 -c "import json;d=json.load(open('/tmp/cn'));assert d['status']=='CANCELLED',d" || fail "cancel body"
+
+          code=$(curl -s -o /tmp/cn2 -w '%{http_code}' -X POST "$BASE/api/1111/requests/$NEWID/cancel")
+          [ "$code" = 409 ] || fail "repeat cancel status $code"
+          grep -q 'Invalid status transition' /tmp/cn2 || fail "repeat cancel body"
+
+          code=$(curl -s -o /tmp/cn3 -w '%{http_code}' -X POST "$BASE/api/2222/requests/2/cancel")
+          [ "$code" = 409 ] || fail "cancel approved status $code"
+
+          code=$(curl -s -o /tmp/adm0 -w '%{http_code}' -X PATCH "$BASE/api/admin/requests/$ADJID" -H 'Content-Type: application/json' -d '{"status":"APPROVED"}')
+          [ "$code" = 403 ] || fail "admin no key status $code"
+
+          code=$(curl -s -o /tmp/adm404 -w '%{http_code}' -X PATCH "$BASE/api/admin/requests/999999" -H 'X-Admin-Key: local-admin-key' -H 'Content-Type: application/json' -d '{"status":"APPROVED"}')
+          [ "$code" = 404 ] || fail "admin missing id status $code"
+
+          code=$(curl -s -o /tmp/adm1 -w '%{http_code}' -X PATCH "$BASE/api/admin/requests/$ADJID" -H 'X-Admin-Key: local-admin-key' -H 'Content-Type: application/json' -d '{"status":"APPROVED"}')
+          [ "$code" = 200 ] || fail "admin approve status $code: $(cat /tmp/adm1)"
+          python3 -c "import json;d=json.load(open('/tmp/adm1'));assert d['status']=='APPROVED' and d['comment'] is None,d" || fail "approve body"
+
+          code=$(curl -s -o /tmp/adm2 -w '%{http_code}' -X PATCH "$BASE/api/admin/requests/$ADJID" -H 'X-Admin-Key: local-admin-key' -H 'Content-Type: application/json' -d '{"status":"APPROVED"}')
+          [ "$code" = 409 ] || fail "repeat approve status $code"
+
+          code=$(curl -s -o /tmp/rej0 -w '%{http_code}' -X POST "$BASE/api/1111/requests" -H 'Content-Type: application/json' -d '{"fullName":"Смирнов Гость Тестовый","phone":"+79990001133","purpose":"Тестовая встреча","validFrom":"2027-06-02T13:00:00","validTo":"2027-06-02T14:00:00"}')
+          [ "$code" = 201 ] || fail "create for reject status $code"
+          REJID=$(python3 -c "import json;print(json.load(open('/tmp/rej0'))['id'])")
+
+          code=$(curl -s -o /tmp/adm3 -w '%{http_code}' -X PATCH "$BASE/api/admin/requests/$REJID" -H 'X-Admin-Key: local-admin-key' -H 'Content-Type: application/json' -d '{"status":"REJECTED"}')
+          [ "$code" = 400 ] || fail "reject no comment status $code"
+          python3 -c "import json;d=json.load(open('/tmp/adm3'));assert 'comment' in d['errors'],d" || fail "reject no comment body"
+
+          code=$(curl -s -o /tmp/adm4 -w '%{http_code}' -X PATCH "$BASE/api/admin/requests/$REJID" -H 'X-Admin-Key: local-admin-key' -H 'Content-Type: application/json' -d '{"status":"REJECTED","comment":"Нет согласования"}')
+          [ "$code" = 200 ] || fail "reject status $code: $(cat /tmp/adm4)"
+          python3 -c "import json;d=json.load(open('/tmp/adm4'));assert d['status']=='REJECTED' and d['comment']=='Нет согласования',d" || fail "reject body"
+
+          code=$(curl -s -o /tmp/list2 -w '%{http_code}' "$BASE/api/1111/requests?status=CANCELLED")
+          [ "$code" = 200 ] || fail "final list status $code"
+          python3 -c "import json;d=json.load(open('/tmp/list2'));assert len(d)==2 and d[0]['id']==4,d" || fail "final list body"
+
+          echo "ALL SMOKE TESTS PASSED"
